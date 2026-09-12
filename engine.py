@@ -1,6 +1,6 @@
-from typing import Literal
+from datetime import datetime, timezone
 
-from models import MetaProrrateo, Transaccion
+from models import MetaProrrateo, TipoMedio, Transaccion
 
 
 class MotorFinanciero:
@@ -20,136 +20,134 @@ class MotorFinanciero:
     @property
     def total_prorrateo_acumulado(self) -> float:
         return sum(
-            meta.acumulado_actual
-            for meta in self.metas_prorrateo.values()
-            if meta.activa
+            m.acumulado_actual for m in self.metas_prorrateo.values() if m.activa
         )
 
     @property
-    def total_reservado(self) -> float:
-        return self.caja_ahorro_intocable + self.total_prorrateo_acumulado
-
-    @property
     def liquidez_real(self) -> float:
-        return self.total_posesion - self.total_reservado
+        return (
+            self.total_posesion
+            - self.caja_ahorro_intocable
+            - self.total_prorrateo_acumulado
+        )
 
     def agregar_meta(self, meta: MetaProrrateo) -> None:
         self.metas_prorrateo[meta.id] = meta
 
     def calcular_propuesta_ingreso(
-        self, monto: float
+        self, monto_ingreso: float
     ) -> tuple[float, dict[str, float]]:
-        """Calcula la sugerencia de distribución antes de aplicar los cambios."""
-        monto_ahorro = monto * self.pct_ahorro
+        ahorro_intocable = monto_ingreso * self.pct_ahorro
         distribucion_metas: dict[str, float] = {}
 
         for meta_id, meta in self.metas_prorrateo.items():
             if meta.activa and not meta.esta_cubierto_ciclo:
-                cuota = meta.cuota_mensual_sugerida
-                distribucion_metas[meta_id] = min(cuota, meta.monto_restante)
-            else:
-                distribucion_metas[meta_id] = 0.0
+                cuota = min(meta.cuota_mensual_sugerida, meta.monto_restante)
+                distribucion_metas[meta_id] = round(cuota, 2)
 
-        return monto_ahorro, distribucion_metas
+        return ahorro_intocable, distribucion_metas
 
     def confirmar_ingreso(
         self,
         monto: float,
-        medio: Literal["fisico", "digital"],
+        medio: TipoMedio,
         descripcion: str,
         monto_ahorro: float,
         distribucion_metas: dict[str, float],
     ) -> None:
-        """Aplica la entrada de dinero y ejecuta las reservas confirmadas."""
-        assert monto > 0, "El monto del ingreso debe ser positivo."
-        assert medio in [
-            "fisico",
-            "digital",
-        ], "El medio debe ser 'fisico' o 'digital'."
-
-        # 1. Acreditar saldo total al medio correspondiente
         if medio == "fisico":
             self.saldo_fisico += monto
         else:
             self.saldo_digital += monto
 
-        # 2. Retención activa del 10%
         self.caja_ahorro_intocable += monto_ahorro
 
-        # 3. Distribución a las cajas de prorrateo
-        for meta_id, aporte in distribucion_metas.items():
-            if meta_id in self.metas_prorrateo and aporte > 0:
-                self.metas_prorrateo[meta_id].registrar_aporte(aporte)
+        tx_id = f"tx_{len(self.historial) + 1}"
+        fecha_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 4. Auditoría en historial
-        tx = Transaccion(
-            id=f"tx_{len(self.historial) + 1}",
-            tipo="INGRESO",
-            monto=monto,
-            medio=medio,
-            descripcion=descripcion,
+        self.historial.append(
+            Transaccion(
+                id=tx_id,
+                fecha=fecha_now,
+                tipo="INGRESO",
+                monto=monto,
+                medio=medio,
+                descripcion=descripcion,
+            )
         )
-        self.historial.append(tx)
+
+        for meta_id, monto_cuota in distribucion_metas.items():
+            if meta_id in self.metas_prorrateo and monto_cuota > 0:
+                self.metas_prorrateo[meta_id].acumulado_actual += monto_cuota
+                self.historial.append(
+                    Transaccion(
+                        id=f"tx_{len(self.historial) + 1}",
+                        fecha=fecha_now,
+                        tipo="CUOTA_PRORRATEO",
+                        monto=monto_cuota,
+                        medio=medio,
+                        descripcion=f"Reserva para {self.metas_prorrateo[meta_id].nombre}",
+                        meta_id=meta_id,
+                    )
+                )
 
     def registrar_gasto_corriente(
-        self,
-        monto: float,
-        medio: Literal["fisico", "digital"],
-        descripcion: str,
+        self, monto: float, medio: TipoMedio, descripcion: str
     ) -> None:
-        """Registra un gasto diario garantizando que no toque fondos reservados."""
-        assert monto > 0, "El monto del gasto debe ser mayor a cero."
-
-        saldo_disponible_medio = (
-            self.saldo_fisico if medio == "fisico" else self.saldo_digital
-        )
-        assert saldo_disponible_medio >= monto, f"Saldo insuficiente en medio {medio}."
-
-        # Fail-Fast: Proteger las reservas lógicas (Ahorro 10% + Prorrateos)
         assert (
-            self.liquidez_real >= monto
-        ), f"Operación bloqueada: Liquidez real insuficiente (${self.liquidez_real:,.2f})."
+            monto <= self.liquidez_real
+        ), f"Gasto no permitido: supera la liquidez libre (${self.liquidez_real:,.2f})"
 
         if medio == "fisico":
+            assert monto <= self.saldo_fisico, "Saldo físico insuficiente en billetera."
             self.saldo_fisico -= monto
         else:
+            assert (
+                monto <= self.saldo_digital
+            ), "Saldo digital insuficiente en banco/app."
             self.saldo_digital -= monto
 
-        tx = Transaccion(
-            id=f"tx_{len(self.historial) + 1}",
-            tipo="GASTO_CORRIENTE",
-            monto=monto,
-            medio=medio,
-            descripcion=descripcion,
+        tx_id = f"tx_{len(self.historial) + 1}"
+        self.historial.append(
+            Transaccion(
+                id=tx_id,
+                fecha=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                tipo="GASTO_CORRIENTE",
+                monto=monto,
+                medio=medio,
+                descripcion=descripcion,
+            )
         )
-        self.historial.append(tx)
 
-    def ejecutar_pago_meta(
-        self, meta_id: str, medio: Literal["fisico", "digital"]
-    ) -> None:
-        """Efectúa el pago final de una meta desde el dinero real y resetea su ciclo."""
-        meta = self.metas_prorrateo.get(meta_id)
-        assert meta is not None and meta.activa, "Meta no válida o inactiva."
-
-        monto_a_pagar = meta.monto_total
-        saldo_medio = self.saldo_fisico if medio == "fisico" else self.saldo_digital
-        assert (
-            saldo_medio >= monto_a_pagar
-        ), f"Saldo insuficiente en medio {medio} para pagar la meta."
+    def ejecutar_pago_meta(self, meta_id: str, medio: TipoMedio) -> None:
+        assert meta_id in self.metas_prorrateo, "Meta no encontrada."
+        meta = self.metas_prorrateo[meta_id]
+        monto_pago = meta.monto_total
 
         if medio == "fisico":
-            self.saldo_fisico -= monto_a_pagar
+            assert (
+                self.saldo_fisico >= monto_pago
+            ), "Efectivo insuficiente para efectuar el pago de esta meta."
+            self.saldo_fisico -= monto_pago
         else:
-            self.saldo_digital -= monto_a_pagar
+            assert (
+                self.saldo_digital >= monto_pago
+            ), "Saldo digital insuficiente para efectuar el pago de esta meta."
+            self.saldo_digital -= monto_pago
 
-        meta.reiniciar_ciclo()
-
-        tx = Transaccion(
-            id=f"tx_{len(self.historial) + 1}",
-            tipo="PAGO_META",
-            monto=monto_a_pagar,
-            medio=medio,
-            descripcion=f"Pago efectuado: {meta.nombre}",
-            meta_id=meta_id,
+        self.historial.append(
+            Transaccion(
+                id=f"tx_{len(self.historial) + 1}",
+                fecha=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                tipo="PAGO_META",
+                monto=monto_pago,
+                medio=medio,
+                descripcion=f"Pago definitivo de meta: {meta.nombre}",
+                meta_id=meta_id,
+            )
         )
-        self.historial.append(tx)
+
+        if meta.tipo_meta == "recurrente":
+            meta.renovar_ciclo()
+        else:
+            meta.activa = False

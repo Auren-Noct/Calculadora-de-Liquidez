@@ -1,14 +1,11 @@
 import json
 import os
-from dataclasses import asdict
-from typing import Literal, cast
+from dataclasses import asdict, fields
+from datetime import datetime, timezone
+from typing import cast
 
 from engine import MotorFinanciero
-from models import MetaProrrateo, Transaccion
-
-TipoCiclo = Literal["cerrado_mensual", "abierto_anual", "temporal"]
-TipoMedio = Literal["fisico", "digital"]
-TipoTx = Literal["INGRESO", "GASTO_CORRIENTE", "CUOTA_PRORRATEO", "PAGO_META"]
+from models import MetaProrrateo, TipoMedio, TipoMeta, TipoTx, Transaccion
 
 
 class RepositorioLocal:
@@ -40,15 +37,33 @@ class RepositorioLocal:
         motor.saldo_digital = data.get("saldo_digital", 0.0)
         motor.caja_ahorro_intocable = data.get("caja_ahorro_intocable", 0.0)
 
+        campos_meta = {f.name for f in fields(MetaProrrateo)}
+        campos_tx = {f.name for f in fields(Transaccion)}
+        hoy_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
         for meta_id, meta_data in data.get("metas_prorrateo", {}).items():
-            meta_data["tipo_ciclo"] = cast(
-                TipoCiclo, meta_data.get("tipo_ciclo", "abierto_anual")
+            if "tipo_ciclo" in meta_data and "tipo_meta" not in meta_data:
+                meta_data["tipo_meta"] = (
+                    "recurrente"
+                    if meta_data.get("tipo_ciclo") != "temporal"
+                    else "puntual"
+                )
+
+            if "fecha_limite" not in meta_data:
+                meta_data["fecha_limite"] = meta_data.get("fecha", hoy_str)
+
+            meta_data["tipo_meta"] = cast(
+                TipoMeta, meta_data.get("tipo_meta", "puntual")
             )
-            motor.metas_prorrateo[meta_id] = MetaProrrateo(**meta_data)
+
+            meta_limpia = {k: v for k, v in meta_data.items() if k in campos_meta}
+            motor.metas_prorrateo[meta_id] = MetaProrrateo(**meta_limpia)
 
         for tx_data in data.get("historial", []):
             tx_data["tipo"] = cast(TipoTx, tx_data.get("tipo"))
             tx_data["medio"] = cast(TipoMedio, tx_data.get("medio"))
-            motor.historial.append(Transaccion(**tx_data))
+
+            tx_limpia = {k: v for k, v in tx_data.items() if k in campos_tx}
+            motor.historial.append(Transaccion(**tx_limpia))
 
         return motor

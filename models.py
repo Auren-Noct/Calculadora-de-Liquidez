@@ -1,6 +1,11 @@
+import calendar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal
+
+TipoMeta = Literal["recurrente", "puntual"]
+TipoMedio = Literal["fisico", "digital"]
+TipoTx = Literal["INGRESO", "GASTO_CORRIENTE", "CUOTA_PRORRATEO", "PAGO_META"]
 
 
 @dataclass
@@ -8,62 +13,64 @@ class MetaProrrateo:
     id: str
     nombre: str
     monto_total: float
-    meses_plazo: int
+    fecha_limite: str  # Formato ISO 'YYYY-MM-DD'
+    tipo_meta: TipoMeta = "puntual"
+    intervalo_meses_recurrencia: int = 12
     acumulado_actual: float = 0.0
-    tipo_ciclo: Literal["cerrado_mensual", "abierto_anual", "temporal"] = (
-        "abierto_anual"
-    )
-    meses_transcurridos: int = 0
     activa: bool = True
+
+    @property
+    def meses_restantes(self) -> int:
+        hoy = datetime.now(timezone.utc).date()
+        limite = (
+            datetime.strptime(self.fecha_limite, "%Y-%m-%d")
+            .replace(tzinfo=timezone.utc)
+            .date()
+        )
+        diferencia_meses = (limite.year - hoy.year) * 12 + (limite.month - hoy.month)
+        return max(1, diferencia_meses)
 
     @property
     def monto_restante(self) -> float:
         return max(0.0, self.monto_total - self.acumulado_actual)
 
     @property
-    def meses_restantes(self) -> int:
-        return max(1, self.meses_plazo - self.meses_transcurridos)
-
-    @property
     def cuota_mensual_sugerida(self) -> float:
-        """Calcula la cuota adaptativa según el saldo pendiente y los meses faltantes."""
-        if not self.activa or self.esta_cubierto_ciclo:
+        if self.monto_restante <= 0:
             return 0.0
         return self.monto_restante / self.meses_restantes
 
     @property
     def esta_cubierto_ciclo(self) -> bool:
-        """Determina si el ciclo actual ya completó su cuota."""
-        if self.tipo_ciclo == "cerrado_mensual":
-            cuota_esperada_mes = self.monto_total / max(1, self.meses_plazo)
-            return self.acumulado_actual >= cuota_esperada_mes
-        return self.monto_restante == 0.0
+        return self.acumulado_actual >= self.monto_total
 
-    def registrar_aporte(self, monto: float) -> float:
-        """Suma fondos a la meta respetando el tope del monto total."""
-        monto_efectivo = min(monto, self.monto_restante)
-        self.acumulado_actual += monto_efectivo
-        return monto_efectivo
+    def renovar_ciclo(self) -> None:
+        """Avanza la fecha límite según su intervalo de recurrencia si la meta es periódica."""
+        limite_actual = (
+            datetime.strptime(self.fecha_limite, "%Y-%m-%d")
+            .replace(tzinfo=timezone.utc)
+            .date()
+        )
+        nuevo_mes = (
+            limite_actual.month - 1 + self.intervalo_meses_recurrencia
+        ) % 12 + 1
+        nuevo_anio = (
+            limite_actual.year
+            + (limite_actual.month - 1 + self.intervalo_meses_recurrencia) // 12
+        )
+        max_dias = calendar.monthrange(nuevo_anio, nuevo_mes)[1]
+        nueva_fecha = date(nuevo_anio, nuevo_mes, min(limite_actual.day, max_dias))
 
-    def reiniciar_ciclo(self) -> None:
-        """Reinicia el acumulado al vencer el ciclo si es recurrente."""
-        if self.tipo_ciclo in ["cerrado_mensual", "abierto_anual"]:
-            self.acumulado_actual = 0.0
-            self.meses_transcurridos = 0
-        elif self.tipo_ciclo == "temporal":
-            self.activa = False
+        self.fecha_limite = nueva_fecha.strftime("%Y-%m-%d")
+        self.acumulado_actual = 0.0
 
 
 @dataclass
 class Transaccion:
     id: str
-    tipo: Literal["INGRESO", "GASTO_CORRIENTE", "CUOTA_PRORRATEO", "PAGO_META"]
+    fecha: str
+    tipo: TipoTx
     monto: float
-    medio: Literal["fisico", "digital"]
+    medio: TipoMedio
     descripcion: str
-    fecha: str = ""
     meta_id: str | None = None
-
-    def __post_init__(self):
-        if not self.fecha:
-            self.fecha = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
