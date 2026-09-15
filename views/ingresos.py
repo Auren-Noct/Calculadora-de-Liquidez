@@ -29,18 +29,23 @@ def render(motor: MotorFinanciero, guardar_cb: Callable[[], None]) -> None:
     if metas_activas:
         st.subheader("🎯 Asignación a Metas de Prorrateo")
         for meta in metas_activas:
+            # Se calcula cuánto falta exclusivamente para cubrir este mes/ciclo
+            faltante_ciclo = max(
+                0.0, meta.monto_total - meta.acumulado_actual - meta.pagado_ciclo_actual
+            )
+
             col_m, col_val, col_adelanto = st.columns([2, 2, 1])
             with col_m:
                 st.write(f"**{meta.nombre}**")
                 st.caption(
-                    f"Cuota sugerida: ${meta.cuota_mensual_sugerida:,.2f} | Faltante: ${meta.monto_restante:,.2f}"
+                    f"Cuota mensual: ${meta.cuota_fija:,.2f} | Faltante del ciclo: ${faltante_ciclo:,.2f}"
                 )
             with col_val:
                 monto_aporte = st.number_input(
                     f"Aporte ($) - {meta.nombre}",
                     min_value=0.0,
-                    max_value=float(meta.monto_restante),
-                    value=float(min(meta.cuota_mensual_sugerida, meta.monto_restante)),
+                    max_value=float(faltante_ciclo) if faltante_ciclo > 0 else 0.0,
+                    value=float(min(meta.cuota_fija, faltante_ciclo)),
                     key=f"ingreso_meta_{meta.id}",
                 )
                 if monto_aporte > 0:

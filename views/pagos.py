@@ -7,7 +7,9 @@ from engine import MotorFinanciero
 from models import TipoMedio
 
 
-def render(motor: MotorFinanciero, guardar_cb: Callable[[], None]) -> None:
+def render(
+    motor: MotorFinanciero, guardar_cb: Callable[[], None] = lambda: None
+) -> None:
     st.title("🎯 Salida de Dinero: Pago a Proveedor")
 
     metas_activas = [m for m in motor.metas_prorrateo.values() if m.activa]
@@ -16,37 +18,47 @@ def render(motor: MotorFinanciero, guardar_cb: Callable[[], None]) -> None:
         return
 
     meta_obj = st.selectbox(
-        "Seleccionar meta a saldar:",
+        "Seleccionar compromiso / meta a saldar:",
         options=metas_activas,
         format_func=lambda m: (
-            f"{m.nombre} | Reserva: ${m.acumulado_actual:,.2f} | Total: ${m.monto_total:,.2f}"
+            f"{m.nombre} | Tipo: {m.tipo_meta.replace('_', ' ').title()} | Reserva actual: ${m.acumulado_actual:,.2f}"
         ),
     )
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("📦 Acumulado en Reserva", f"${meta_obj.acumulado_actual:,.2f}")
+    col1.metric("📦 Reserva en Caja", f"${meta_obj.acumulado_actual:,.2f}")
     col2.metric("💧 Liquidez Real Libre", f"${motor.liquidez_real:,.2f}")
-    col3.metric("🎯 Monto Objetivo Meta", f"${meta_obj.monto_total:,.2f}")
+    col3.metric("🎯 Monto Total / Cuota Base", f"${meta_obj.monto_total:,.2f}")
 
-    modalidad_opcion = st.radio(
-        "Modalidad de débito:",
-        [
-            "Usar Reserva Acumulada (Diferencia desde Liquidez Real si falta)",
-            "Amortización Extraordinaria (Usar 100% Liquidez Real)",
-        ],
-    )
-    modalidad_key = (
-        "reserva_y_liquidez" if "Reserva" in modalidad_opcion else "liquidez_pura"
+    # Definimos opciones según la naturaleza de la meta
+    if meta_obj.tipo_meta == "ahorro_objetivo":
+        modalidad_opcion = st.radio(
+            "Modalidad de pago:",
+            [
+                "Romper caja de reserva y usar lo ahorrado",
+                "Pagar 100% de mi bolsillo (mantener el ahorro intacto)",
+            ],
+        )
+        modalidad_key = (
+            "reserva_y_liquidez" if "Romper" in modalidad_opcion else "liquidez_pura"
+        )
+    else:
+        # Para pago de cuotas o gastos cíclicos
+        st.info(
+            "💡 Este compromiso descuenta preferentemente el dinero reservado para este ciclo."
+        )
+        modalidad_key = "reserva_y_liquidez"
+
+    monto_sugerido = (
+        meta_obj.acumulado_actual
+        if meta_obj.acumulado_actual > 0
+        else meta_obj.monto_total
     )
 
     monto_pago = st.number_input(
-        "Monto a pagar al proveedor ($):",
+        "Monto real a abonar al proveedor ($):",
         min_value=0.01,
-        value=float(
-            meta_obj.acumulado_actual
-            if meta_obj.acumulado_actual > 0
-            else meta_obj.monto_total
-        ),
+        value=float(monto_sugerido),
         step=500.0,
     )
 
@@ -60,9 +72,9 @@ def render(motor: MotorFinanciero, guardar_cb: Callable[[], None]) -> None:
     )
     liquidez_usada = max(0.0, monto_pago - reserva_usada)
 
-    st.markdown("##### 📌 Desglose de la Salida de Fondos")
-    st.write(f"• Consumo de Reserva Guardada: **${reserva_usada:,.2f}**")
-    st.write(f"• Consumo de Liquidez Libre: **${liquidez_usada:,.2f}**")
+    st.markdown("##### 📌 Desglose Estimado de la Salida")
+    st.write(f"• Consumo de Reserva Acumulada: **${reserva_usada:,.2f}**")
+    st.write(f"• Consumo de Liquidez / Bolsillo: **${liquidez_usada:,.2f}**")
 
     if st.button("Efectuar Pago"):
         try:

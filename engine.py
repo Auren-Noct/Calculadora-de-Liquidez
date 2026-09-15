@@ -66,12 +66,11 @@ class MotorFinanciero:
                 tipo="LIBERACION_RESERVA",
                 monto=monto_reintegrado,
                 medio="digital",
-                descripcion=f"Baja de meta '{meta.nombre}'. Reintegro de reserva a Liquidez Real.",
+                descripcion=f"Baja de meta '{meta.nombre}'. Reintegro a Liquidez Real.",
                 meta_id=meta_id,
                 meta_nombre=meta.nombre,
             )
         )
-
         return monto_reintegrado
 
     def confirmar_ingreso(
@@ -92,7 +91,6 @@ class MotorFinanciero:
             self.saldo_digital += monto
 
         self.caja_ahorro_intocable += monto_ahorro
-
         fecha_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         self.historial.append(
@@ -108,38 +106,46 @@ class MotorFinanciero:
 
         for meta_id, monto_cuota in distribucion_metas.items():
             if meta_id in self.metas_prorrateo and monto_cuota > 0:
-                meta = self.metas_prorrateo[meta_id]
-                es_adelanto = modalidades_aporte.get(meta_id, False)
-
-                meta.acumulado_actual += monto_cuota
-
-                self.historial.append(
-                    Transaccion(
-                        id=f"tx_{len(self.historial) + 1}",
-                        fecha=fecha_now,
-                        tipo="CUOTA_PRORRATEO",
-                        monto=monto_cuota,
-                        medio=medio,
-                        descripcion=f"Reserva para '{meta.nombre}' ({'Adelanto' if es_adelanto else 'Cuota Regular'})",
-                        meta_id=meta_id,
-                        meta_nombre=meta.nombre,
-                    )
+                self.aportar_a_reserva_interna(
+                    meta_id, monto_cuota, f"Distribución de ingreso: {descripcion}"
                 )
+
+    def aportar_a_reserva_interna(
+        self, meta_id: str, monto: float, descripcion: str = "Reserva manual"
+    ) -> None:
+        """Mueve dinero de la Liquidez Real a la caja de la meta sin afectar la posesión total."""
+        assert meta_id in self.metas_prorrateo, "Meta no encontrada."
+        meta = self.metas_prorrateo[meta_id]
+        meta.acumulado_actual += monto
+
+        # Se asienta en el historial pero no descuenta de saldo_fisico/digital
+        self.historial.append(
+            Transaccion(
+                id=f"tx_{len(self.historial) + 1}",
+                fecha=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                tipo="CUOTA_PRORRATEO",
+                monto=monto,
+                medio="digital",  # Es un movimiento lógico
+                descripcion=f"Aporte a reserva de '{meta.nombre}' ({descripcion})",
+                meta_id=meta_id,
+                meta_nombre=meta.nombre,
+            )
+        )
 
     def registrar_gasto_corriente(
         self, monto: float, medio: TipoMedio, descripcion: str
     ) -> None:
-        assert (
-            monto <= self.liquidez_real
-        ), f"Gasto no permitido: supera la liquidez libre (${self.liquidez_real:,.2f})"
-
+        # ELIMINADO: La restricción que te impedía gastar si no tenías Liquidez Real.
+        # Ahora solo verifica que tengas la plata física/digital real.
         if medio == "fisico":
-            assert monto <= self.saldo_fisico, "Saldo físico insuficiente en billetera."
+            assert (
+                monto <= self.saldo_fisico
+            ), f"Saldo físico insuficiente en billetera (Tenés ${self.saldo_fisico:,.2f})."
             self.saldo_fisico -= monto
         else:
             assert (
                 monto <= self.saldo_digital
-            ), "Saldo digital insuficiente en banco/app."
+            ), f"Saldo digital insuficiente en banco/app (Tenés ${self.saldo_digital:,.2f})."
             self.saldo_digital -= monto
 
         tx_id = f"tx_{len(self.historial) + 1}"
@@ -173,50 +179,96 @@ class MotorFinanciero:
         else:
             monto_liquidez_usado = monto_pago
 
-        if monto_liquidez_usado > 0:
-            assert (
-                monto_liquidez_usado <= self.liquidez_real
-            ), f"Liquidez Real insuficiente para cubrir la diferencia (${self.liquidez_real:,.2f})."
+        # ELIMINADO: La restricción que bloqueaba el pago si consumía ahorro por emergencia.
 
         saldo_disponible = (
             self.saldo_fisico if medio == "fisico" else self.saldo_digital
         )
         assert (
             saldo_disponible >= monto_pago
-        ), f"Saldo insuficiente en medio '{medio}' (${saldo_disponible:,.2f}) para abonar ${monto_pago:,.2f}."
+        ), f"Saldo real insuficiente en medio '{medio}' (${saldo_disponible:,.2f})."
 
         if medio == "fisico":
             self.saldo_fisico -= monto_pago
         else:
             self.saldo_digital -= monto_pago
 
-        meta.monto_historico_pagado += monto_pago
         meta.acumulado_actual -= monto_reserva_usado
+        meta.registrar_pago(monto=monto_pago, medio=medio, modalidad=modalidad)
 
         tx_id = f"tx_{len(self.historial) + 1}"
-        fecha_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
         self.historial.append(
             Transaccion(
                 id=tx_id,
-                fecha=fecha_now,
+                fecha=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 tipo="PAGO_META",
                 monto=monto_pago,
                 medio=medio,
                 descripcion=(
                     f"Pago a '{meta.nombre}' ({modalidad}). "
-                    f"[Reserva: ${monto_reserva_usado:,.2f} | Liquidez: ${monto_liquidez_usado:,.2f}]"
+                    f"[Reserva: ${monto_reserva_usado:,.2f} | Liquidez/Emergencia: ${monto_liquidez_usado:,.2f}]"
                 ),
                 meta_id=meta_id,
                 meta_nombre=meta.nombre,
             )
         )
 
-        if meta.tipo_meta == "recurrente":
-            if (
-                meta.monto_historico_pagado >= meta.monto_total
-                or meta.esta_cubierto_ciclo
-            ):
+        if meta.tipo_meta in ["gasto_ciclico", "pago_cuotas"]:
+            if meta.pagado_ciclo_actual >= meta.monto_total or meta.esta_cubierto_ciclo:
                 meta.renovar_ciclo()
         elif meta.monto_historico_pagado >= meta.monto_total:
             meta.activa = False
+
+    def revertir_transaccion(self, tx_id: str) -> None:
+        """Revierte los efectos financieros de una transacción si hubo un error humano."""
+        tx_original = next((t for t in self.historial if t.id == tx_id), None)
+        assert tx_original is not None, "Transacción no encontrada."
+        assert not tx_original.es_revertida, "Ya fue revertida."
+        assert tx_original.tipo != "REVERSION", "No se revierte una reversión."
+
+        if tx_original.tipo == "INGRESO":
+            if tx_original.medio == "fisico":
+                self.saldo_fisico -= tx_original.monto
+            else:
+                self.saldo_digital -= tx_original.monto
+        elif tx_original.tipo == "CUOTA_PRORRATEO":
+            meta = self.metas_prorrateo.get(tx_original.meta_id or "")
+            if meta:
+                meta.acumulado_actual = max(
+                    0.0, meta.acumulado_actual - tx_original.monto
+                )
+        elif tx_original.tipo == "GASTO_CORRIENTE":
+            if tx_original.medio == "fisico":
+                self.saldo_fisico += tx_original.monto
+            else:
+                self.saldo_digital += tx_original.monto
+        elif tx_original.tipo == "PAGO_META":
+            if tx_original.medio == "fisico":
+                self.saldo_fisico += tx_original.monto
+            else:
+                self.saldo_digital += tx_original.monto
+            meta = self.metas_prorrateo.get(tx_original.meta_id or "")
+            if meta:
+                meta.monto_historico_pagado = max(
+                    0.0, meta.monto_historico_pagado - tx_original.monto
+                )
+                meta.activa = True
+        elif tx_original.tipo == "LIBERACION_RESERVA":
+            meta = self.metas_prorrateo.get(tx_original.meta_id or "")
+            if meta:
+                meta.acumulado_actual += tx_original.monto
+                meta.activa = True
+
+        tx_original.es_revertida = True
+        tx_rev = Transaccion(
+            id=f"tx_{len(self.historial) + 1}",
+            fecha=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            tipo="REVERSION",
+            monto=tx_original.monto,
+            medio=tx_original.medio,
+            descripcion=f"Reversión de {tx_original.id}",
+            meta_id=tx_original.meta_id,
+            meta_nombre=tx_original.meta_nombre,
+            tx_origen_id=tx_original.id,
+        )
+        self.historial.append(tx_rev)

@@ -33,7 +33,7 @@ opcion = st.sidebar.radio(
 )
 
 VISTAS = {
-    "📊 Panel Principal": lambda: panel.render(motor),
+    "📊 Panel Principal": lambda: panel.render(motor, guardar_cambios),
     "💵 Registrar Ingreso": lambda: ingresos.render(motor, guardar_cambios),
     "🛒 Registrar Gasto Diario": lambda: gastos.render(motor, guardar_cambios),
     "🎯 Pagar Meta a Proveedor": lambda: pagos.render(motor, guardar_cambios),
