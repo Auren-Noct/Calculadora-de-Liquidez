@@ -118,14 +118,13 @@ class MotorFinanciero:
         meta = self.metas_prorrateo[meta_id]
         meta.acumulado_actual += monto
 
-        # Se asienta en el historial pero no descuenta de saldo_fisico/digital
         self.historial.append(
             Transaccion(
                 id=f"tx_{len(self.historial) + 1}",
                 fecha=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 tipo="CUOTA_PRORRATEO",
                 monto=monto,
-                medio="digital",  # Es un movimiento lógico
+                medio="digital",
                 descripcion=f"Aporte a reserva de '{meta.nombre}' ({descripcion})",
                 meta_id=meta_id,
                 meta_nombre=meta.nombre,
@@ -135,8 +134,6 @@ class MotorFinanciero:
     def registrar_gasto_corriente(
         self, monto: float, medio: TipoMedio, descripcion: str
     ) -> None:
-        # ELIMINADO: La restricción que te impedía gastar si no tenías Liquidez Real.
-        # Ahora solo verifica que tengas la plata física/digital real.
         if medio == "fisico":
             assert (
                 monto <= self.saldo_fisico
@@ -179,8 +176,6 @@ class MotorFinanciero:
         else:
             monto_liquidez_usado = monto_pago
 
-        # ELIMINADO: La restricción que bloqueaba el pago si consumía ahorro por emergencia.
-
         saldo_disponible = (
             self.saldo_fisico if medio == "fisico" else self.saldo_digital
         )
@@ -193,6 +188,7 @@ class MotorFinanciero:
         else:
             self.saldo_digital -= monto_pago
 
+        # Actualizamos la reserva ANTES de asentar el pago
         meta.acumulado_actual -= monto_reserva_usado
         meta.registrar_pago(monto=monto_pago, medio=medio, modalidad=modalidad)
 
@@ -213,14 +209,23 @@ class MotorFinanciero:
             )
         )
 
+        # 1. ¿El ciclo se cumplió externamente? Avanzamos el calendario temporal.
         if meta.tipo_meta in ["gasto_ciclico", "pago_cuotas"]:
-            if meta.pagado_ciclo_actual >= meta.monto_total or meta.esta_cubierto_ciclo:
+            # Bucle while para renovar múltiples ciclos si el pago excede una cuota
+            while meta.cuota_fija > 0 and meta.pagado_ciclo_actual >= (
+                meta.cuota_fija - 0.01
+            ):
                 meta.renovar_ciclo()
-        elif meta.monto_historico_pagado >= meta.monto_total:
+
+        # 2. ¿La meta se terminó de pagar globalmente? La desactivamos.
+        # (El gasto_ciclico infinito no pasa por acá)
+        if meta.tipo_meta in [
+            "ahorro_objetivo",
+            "pago_cuotas",
+        ] and meta.monto_historico_pagado >= (meta.monto_total - 0.01):
             meta.activa = False
 
     def revertir_transaccion(self, tx_id: str) -> None:
-        """Revierte los efectos financieros de una transacción si hubo un error humano."""
         tx_original = next((t for t in self.historial if t.id == tx_id), None)
         assert tx_original is not None, "Transacción no encontrada."
         assert not tx_original.es_revertida, "Ya fue revertida."
@@ -249,10 +254,8 @@ class MotorFinanciero:
                 self.saldo_digital += tx_original.monto
             meta = self.metas_prorrateo.get(tx_original.meta_id or "")
             if meta:
-                meta.monto_historico_pagado = max(
-                    0.0, meta.monto_historico_pagado - tx_original.monto
-                )
-                meta.activa = True
+                # Delegamos la reversión exacta de ciclos y saldos al modelo
+                meta.revertir_pago_externo(tx_original.monto)
         elif tx_original.tipo == "LIBERACION_RESERVA":
             meta = self.metas_prorrateo.get(tx_original.meta_id or "")
             if meta:

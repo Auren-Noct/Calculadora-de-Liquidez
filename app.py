@@ -2,7 +2,7 @@ import streamlit as st
 
 from engine import MotorFinanciero
 from repository import RepositorioFinanciero
-from views import gastos, ingresos, metas, pagos, panel
+from views import gastos, ingresos, metas, panel
 
 st.set_page_config(
     page_title="Control Financiero - Liquidez y Prorrateo", layout="wide"
@@ -27,7 +27,6 @@ opcion = st.sidebar.radio(
         "📊 Panel Principal",
         "💵 Registrar Ingreso",
         "🛒 Registrar Gasto Diario",
-        "🎯 Pagar Meta a Proveedor",
         "⚙️ Gestión de Metas",
     ],
 )
@@ -36,7 +35,6 @@ VISTAS = {
     "📊 Panel Principal": lambda: panel.render(motor, guardar_cambios),
     "💵 Registrar Ingreso": lambda: ingresos.render(motor, guardar_cambios),
     "🛒 Registrar Gasto Diario": lambda: gastos.render(motor, guardar_cambios),
-    "🎯 Pagar Meta a Proveedor": lambda: pagos.render(motor, guardar_cambios),
     "⚙️ Gestión de Metas": lambda: metas.render(motor, guardar_cambios),
 }
 
