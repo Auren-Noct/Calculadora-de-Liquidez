@@ -114,6 +114,9 @@ class MotorFinanciero:
         self, meta_id: str, monto: float, descripcion: str = "Reserva manual"
     ) -> None:
         """Mueve dinero de la Liquidez Real a la caja de la meta sin afectar la posesión total."""
+        assert (
+            monto <= self.liquidez_real
+        ), f"Liquidez Real insuficiente. Tenés libres: ${self.liquidez_real:,.2f}"
         assert meta_id in self.metas_prorrateo, "Meta no encontrada."
         meta = self.metas_prorrateo[meta_id]
         meta.acumulado_actual += monto
@@ -209,13 +212,18 @@ class MotorFinanciero:
             )
         )
 
-        # 1. ¿El ciclo se cumplió externamente? Avanzamos el calendario temporal.
+        # Procesar las obligaciones financieras cubiertas por el pago
         if meta.tipo_meta in ["gasto_ciclico", "pago_cuotas"]:
-            # Bucle while para renovar múltiples ciclos si el pago excede una cuota
-            while meta.cuota_fija > 0 and meta.pagado_ciclo_actual >= (
-                meta.cuota_fija - 0.01
-            ):
-                meta.renovar_ciclo()
+            while True:
+                exigencia_financiera = meta.valor_cuota_financiera(
+                    meta.ciclos_pagados + 1
+                )
+                if exigencia_financiera > 0 and meta.pagado_ciclo_actual >= (
+                    exigencia_financiera - 0.01
+                ):
+                    meta.renovar_ciclo()
+                else:
+                    break
 
         # 2. ¿La meta se terminó de pagar globalmente? La desactivamos.
         # (El gasto_ciclico infinito no pasa por acá)

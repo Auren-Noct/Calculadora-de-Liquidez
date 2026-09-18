@@ -44,8 +44,8 @@ def render(
         for meta in metas_activas:
             est = meta.estado_periodo
             estado_txt = est.get("estado", "")
-            # Actualizado: Ahora lee "pendiente_periodo" del modelo
-            pendiente = float(est.get("pendiente_periodo", 0.0))
+            # 1. Leemos el déficit real del nuevo contrato
+            deficit = float(est.get("deficit_exigible", 0.0))
 
             with st.container(border=True):
                 col_info, col_acc = st.columns([3, 2])
@@ -54,38 +54,43 @@ def render(
                     st.markdown(f"#### {meta.nombre}")
                     tipo_limpio = meta.tipo_meta.replace("_", " ").title()
 
-                    # 1. Claridad temporal: Mostramos exactamente qué ciclo se está evaluando
-                    st.caption(
-                        f"**Tipo:** {tipo_limpio} | "
-                        f"**Período evaluado:** {meta.inicio_ciclo_actual.strftime('%d/%m/%Y')} al {meta.fecha_vencimiento_actual.strftime('%d/%m/%Y')} | "
-                        f"**Exigencia:** ${meta.cuota_fija:,.2f}"
-                    )
+                    # 2. Claridad temporal según la naturaleza de la meta
+                    if meta.tipo_meta == "ahorro_objetivo":
+                        st.caption(
+                            f"**Tipo:** {tipo_limpio} | "
+                            f"**Progreso evaluado:** {meta.dt_inicio.strftime('%d/%m/%Y')} al {meta.dt_limite.strftime('%d/%m/%Y')} | "
+                            f"**Objetivo Final:** ${meta.monto_total:,.2f}"
+                        )
+                    else:
+                        st.caption(
+                            f"**Tipo:** {tipo_limpio} | "
+                            f"**Ventana actual:** {meta.inicio_ciclo_actual.strftime('%d/%m/%Y')} al {meta.fecha_vencimiento_actual.strftime('%d/%m/%Y')} | "
+                            f"**Exigencia de ventana:** ${meta.cuota_fija:,.2f}"
+                        )
 
-                    # 2. Diferenciación de estados: Reservado vs Pagado
+                    # 3. Estados desacoplados del calendario
                     if estado_txt == "cubierto":
-                        # Si hay plata en la reserva que cubre la cuota, está "Reservado"
-                        if meta.acumulado_actual >= meta.cuota_fija:
+                        if meta.tipo_meta == "ahorro_objetivo":
                             st.success(
-                                f"🟢 **Reserva Completa.** Ya separaste el dinero de este ciclo. "
-                                f"Podés dejarlo guardado o pagarle al proveedor. (Caja retenida: **${meta.acumulado_actual:,.2f}**)"
+                                f"🟢 **Ahorro al Día.** Tu progreso supera el tiempo transcurrido. (Caja: **${meta.acumulado_actual:,.2f}**)"
                             )
-                        # Si está cubierto pero la caja está vacía (o casi vacía), significa que ya pagaste y el calendario avanzó
+                        elif meta.acumulado_actual >= meta.cuota_fija:
+                            st.success(
+                                f"🟢 **Reserva Completa.** Separaste el dinero de esta ventana. (Caja: **${meta.acumulado_actual:,.2f}**)"
+                            )
                         else:
                             st.success(
-                                f"🎉 **Pagado / Al día.** No debés nada por ahora. El próximo ciclo "
-                                f"arranca el {meta.inicio_ciclo_actual.strftime('%d/%m/%Y')}. "
-                                f"(Caja retenida: **${meta.acumulado_actual:,.2f}**)"
+                                f"🎉 **Pagado / Al día.** Obligación temporal cubierta. (Caja: **${meta.acumulado_actual:,.2f}**)"
                             )
                     else:
                         st.warning(
-                            f"🔴 **Falta separar dinero:** Faltan **${pendiente:,.2f}** para este período. "
-                            f"(En caja: ${meta.acumulado_actual:,.2f})"
+                            f"🔴 **Déficit actual:** Faltan **${deficit:,.2f}**. (Caja: ${meta.acumulado_actual:,.2f})"
                         )
 
                 with col_acc:
-                    # 1. FORMULARIO DE RESERVA LIBRE (Valor sugerido dinámico por defecto)
+                    # 4. Formulario de reserva con condicionales planos (and)
                     monto_reserva = st.number_input(
-                        "📥 Reservar Liquidez:",
+                        "📥 Ritmo sugerido a reservar:",
                         min_value=0.0,
                         value=float(meta.cuota_sugerida),
                         step=500.0,
@@ -98,13 +103,10 @@ def render(
                         use_container_width=True,
                     )
 
-                    # Aplanado: Usamos "and" en vez de if anidados
                     if btn_reservar and monto_reserva > 0:
                         try:
                             motor.aportar_a_reserva_interna(
-                                meta.id,
-                                monto_reserva,
-                                f"Reserva del mes para {meta.nombre}",
+                                meta.id, monto_reserva, f"Reserva para {meta.nombre}"
                             )
                             guardar_cb()
                             st.success("¡Reserva apartada!")
@@ -112,20 +114,30 @@ def render(
                         except AssertionError as e:
                             st.error(str(e))
                     elif btn_reservar and monto_reserva == 0:
-                        st.info(
-                            "Aporte de $0. No se movió dinero (mes saltado/ignorado)."
-                        )
+                        st.info("Aporte de $0. No se movió dinero.")
 
-                    # 2. EXPANDER PARA PAGAR (Salida real hacia el proveedor)
-                    with st.expander("💸 Pagar al Proveedor"):
-                        sugerido_pago = (
-                            meta.acumulado_actual
-                            if meta.acumulado_actual > 0
-                            else meta.cuota_fija
-                        )
+                    # 5. Formulario de pago/retiro
+                    label_expander = (
+                        "💸 Retirar Fondos"
+                        if meta.tipo_meta == "ahorro_objetivo"
+                        else "💸 Pagar al Proveedor"
+                    )
+                    with st.expander(label_expander):
+                        if meta.tipo_meta == "ahorro_objetivo":
+                            sugerido_pago = (
+                                meta.acumulado_actual
+                                if meta.acumulado_actual > 0
+                                else 0.01
+                            )
+                        else:
+                            sugerido_pago = (
+                                meta.acumulado_actual
+                                if meta.acumulado_actual > 0
+                                else meta.cuota_fija
+                            )
 
                         monto_pago = st.number_input(
-                            "Monto a transferir:",
+                            "Monto de salida:",
                             min_value=0.01,
                             value=float(sugerido_pago),
                             step=500.0,
@@ -141,16 +153,15 @@ def render(
                             "Confirmar Salida", key=f"pag_{meta.id}", type="primary"
                         ):
                             try:
-                                medio = cast(TipoMedio, medio_str)
                                 motor.ejecutar_pago_meta(
                                     meta_id=meta.id,
-                                    medio=medio,
+                                    medio=cast(TipoMedio, medio_str),
                                     monto_pago=monto_pago,
                                     modalidad="reserva_y_liquidez",
                                 )
                                 guardar_cb()
                                 st.success(
-                                    f"Pago asentado. Ciclo de '{meta.nombre}' actualizado."
+                                    f"Salida asentada. '{meta.nombre}' actualizado."
                                 )
                                 st.rerun()
                             except AssertionError as e:
